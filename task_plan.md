@@ -1,22 +1,31 @@
-# Generate ROADMAP.md
+# Task Plan: Update README.md
 
-## Goal
-Create a `ROADMAP.md` file that synthesizes TODO.md priorities with prioritized suggestions from analysis, structured into phases/milestones with effort estimates and dependencies.
+## Overview
+Update the existing minimal README.md to a full-featured one, as per ROADMAP.md Phase 1.
 
-## Task List
-- [ ] Review TODO.md: Group into categories (Editor/Terminal/Browser, Agent Mgmt, Loop, Artifacts, etc.).
-- [ ] Incorporate suggestions: Quick Wins, Core Features, Marketing, Advanced.
-- [ ] Structure ROADMAP:
-  - Overview/Vision.
-  - Milestones/Phases (e.g., v0.1 Quick Wins, v1.0 MVP).
-  - Detailed tasks w/ checkboxes, effort, deps.
-  - Risks/Next Review.
-- [ ] Write full MD content.
-- [ ] Verify: Readable, comprehensive, actionable.
+## Detailed Plan
+1. **Explore Assets**: List `communication/` for screenshots.
+2. **Draft Content**:
+   - Title: # Gravity - Agent-First IDE
+   - Description: From package.json + PLAN.md summary.
+   - Features: Bullet list of Three Pillars, Ultrawork Loop, etc.
+   - Screenshots: Embed if exist (e.g., ![Trial](communication/trial-clicked.png))
+   - ## Quickstart
+     ```bash
+     git clone ...
+     npm i
+     npm run dev
+     ```
+   - ## Ultrawork Loop
+     Explanation + diagram if possible.
+   - ## Roadmap
+     See ROADMAP.md
+   - Footer: Stars, license.
+3. **Implement**: Use `write_file` to update README.md.
+4. **Verify**: `read_file` back, perhaps render check.
 
-## Assumptions
-- Current Electron-React prototype as base (no VSCode fork yet).
-- Solo dev pace: Quick=1-2 days, Core=1 week.
+## Success Criteria
+- Comprehensive, professional README.
+- npm scripts validated.
 
-## Next Phase
-Act
+## Next Phase: Act
