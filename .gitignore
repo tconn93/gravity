@@ -137,3 +137,18 @@ dist
 # Vite logs files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# electron-vite build output
+out/
+
+# Electron builder
+dist/
+release/
+
+installer/
+.claude/
+CLAUDE.md 
+PLAN.md 
+#TODO.md 
+
+communication/
