@@ -3,6 +3,7 @@ import Sidebar from './components/Sidebar'
 import EditorPane from './components/EditorPane'
 import TerminalPanel from './components/TerminalPanel'
 import BrowserPane from './components/BrowserPane'
+import SettingsPanel from './components/SettingsPanel'
 import { useFileSystem } from './hooks/useFileSystem'
 import type { EditorTab } from './types'
 
@@ -31,6 +32,7 @@ export default function App() {
     return s ? Number(s) : DEFAULT_BROWSER_WIDTH
   })
   const [sidebarRefreshKey, setSidebarRefreshKey] = useState(0)
+  const [settingsOpen, setSettingsOpen] = useState(false)
 
   const isDraggingBrowser = useRef(false)
   const dragStartX = useRef(0)
@@ -166,6 +168,18 @@ export default function App() {
     return () => window.removeEventListener('keydown', handler)
   }, [])
 
+  // Cmd+, settings toggle
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === ',') {
+        e.preventDefault()
+        setSettingsOpen(v => !v)
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [])
+
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
@@ -212,26 +226,52 @@ export default function App() {
           </>
         )}
 
-        {/* Browser toggle button (top-right corner, always visible) */}
-        <button
-          onClick={() => setBrowserOpen(v => !v)}
-          title={`${browserOpen ? 'Close' : 'Open'} Browser Panel (Cmd+Shift+B)`}
+        {/* Top-right button group */}
+        <div
           style={{
             position: 'absolute',
             top: 8,
             right: 8,
             zIndex: 50,
-            padding: '4px 10px',
-            background: browserOpen ? 'var(--accent)' : 'var(--bg-tertiary)',
-            color: browserOpen ? '#fff' : 'var(--text-secondary)',
-            borderRadius: 4,
-            fontSize: 11,
-            fontWeight: 500,
-            border: '1px solid var(--border)'
+            display: 'flex',
+            gap: 6,
+            alignItems: 'center'
           }}
         >
-          {browserOpen ? '🌐 Browser' : '🌐'}
-        </button>
+          {/* Settings button */}
+          <button
+            onClick={() => setSettingsOpen(v => !v)}
+            title="Settings (Cmd+,)"
+            style={{
+              padding: '4px 10px',
+              background: settingsOpen ? 'var(--accent)' : 'var(--bg-tertiary)',
+              color: settingsOpen ? '#fff' : 'var(--text-secondary)',
+              borderRadius: 4,
+              fontSize: 11,
+              fontWeight: 500,
+              border: '1px solid var(--border)'
+            }}
+          >
+            ⚙
+          </button>
+
+          {/* Browser toggle button */}
+          <button
+            onClick={() => setBrowserOpen(v => !v)}
+            title={`${browserOpen ? 'Close' : 'Open'} Browser Panel (Cmd+Shift+B)`}
+            style={{
+              padding: '4px 10px',
+              background: browserOpen ? 'var(--accent)' : 'var(--bg-tertiary)',
+              color: browserOpen ? '#fff' : 'var(--text-secondary)',
+              borderRadius: 4,
+              fontSize: 11,
+              fontWeight: 500,
+              border: '1px solid var(--border)'
+            }}
+          >
+            {browserOpen ? '🌐 Browser' : '🌐'}
+          </button>
+        </div>
       </div>
 
       {/* Terminal + Agent panel */}
@@ -242,6 +282,11 @@ export default function App() {
         panelHeight={panelHeight}
         onPanelResize={handlePanelResize}
       />
+
+      {/* Settings panel modal */}
+      {settingsOpen && (
+        <SettingsPanel onClose={() => setSettingsOpen(false)} />
+      )}
     </div>
   )
 }

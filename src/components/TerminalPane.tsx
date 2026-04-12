@@ -59,9 +59,9 @@ export default function TerminalPane({
   }, [sessionId])
 
   const approveCommand = useCallback(() => {
-    const cmd = pendingCommandRef.current
-    if (cmd === null) return
-    sendToTerminal(cmd + '\r')
+    if (pendingCommandRef.current === null) return
+    // The typed characters are already in the PTY's line buffer — only send Enter
+    sendToTerminal('\r')
     inputBufferRef.current = ''
     setPendingCommand(null)
   }, [sendToTerminal])
@@ -163,9 +163,12 @@ export default function TerminalPane({
     if (!container) return
 
     const observer = new ResizeObserver(() => {
-      if (!fitAddonRef.current || !termRef.current) return
-      fitAddonRef.current.fit()
-      const { cols, rows } = termRef.current
+      const fitAddon = fitAddonRef.current
+      const term = termRef.current
+      if (!fitAddon || !term) return
+      fitAddon.fit()
+      term.refresh(0, term.rows - 1)
+      const { cols, rows } = term
       window.electronAPI.terminal.resize(sessionId, cols, rows)
     })
 
@@ -173,12 +176,17 @@ export default function TerminalPane({
     return () => observer.disconnect()
   }, [sessionId])
 
-  // Fit + focus when tab becomes active
+  // Fit + focus + refresh when tab becomes active
   useEffect(() => {
     if (!isActive) return
     const timer = setTimeout(() => {
-      fitAddonRef.current?.fit()
-      termRef.current?.focus()
+      const term = termRef.current
+      const fitAddon = fitAddonRef.current
+      if (!term || !fitAddon) return
+      fitAddon.fit()
+      // Force full redraw — canvas may be stale after visibility:hidden
+      term.refresh(0, term.rows - 1)
+      term.focus()
     }, 50)
     return () => clearTimeout(timer)
   }, [isActive])

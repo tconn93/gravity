@@ -60,7 +60,71 @@ export interface BrowserAPI {
     status: () => Promise<{ running: boolean; port: number | null }>
     onLog: (callback: (line: string) => void) => () => void
     onStopped: (callback: (code: number | null) => void) => () => void
+    addConnection: (cfg: McpConnectionConfig) => Promise<IpcResult>
+    removeConnection: (name: string) => Promise<IpcResult>
+    listConnections: () => Promise<McpConnection[]>
   }
+}
+
+// ─── Multi-provider types ─────────────────────────────────────────────────────
+
+export type Provider = 'xai' | 'anthropic' | 'gemini' | 'openai' | 'ollama' | 'deepseek'
+
+export interface ProviderInfo {
+  name: string
+  baseURL: string
+  extraHeaders?: Record<string, string>
+  requiresKey: boolean
+  envKey: string
+  defaultModels: string[]
+}
+
+export interface GravitySettings {
+  providers: Partial<Record<Provider, string>>  // provider → API key
+  defaultProvider: Provider
+  defaultModel: string
+  terminalPolicy: 'turbo' | 'review'
+  aiCompletionEnabled: boolean
+}
+
+export interface Workflow {
+  name: string
+  description: string
+  role: AgentRole
+  prompt: string
+}
+
+export type AgentMode = 'standard' | 'planning' | 'fast'
+
+// ─── Run configuration types ──────────────────────────────────────────────────
+
+export interface RunConfig {
+  id: string
+  name: string
+  command: string
+  cwd?: string  // relative to workspace root, defaults to root
+  env?: Record<string, string>
+}
+
+export interface RunConfigAPI {
+  list: (workspacePath: string) => Promise<RunConfig[]>
+  save: (workspacePath: string, config: RunConfig) => Promise<void>
+  delete: (workspacePath: string, id: string) => Promise<void>
+  detectNpm: (workspacePath: string) => Promise<RunConfig[]>
+}
+
+// ─── MCP connection types ─────────────────────────────────────────────────────
+
+export interface McpConnectionConfig {
+  name: string
+  command: string
+  args?: string[]
+}
+
+export interface McpConnection extends McpConnectionConfig {
+  status: 'stopped' | 'starting' | 'running' | 'error'
+  port?: number
+  pid?: number
 }
 
 // ─── Agent Manager types ──────────────────────────────────────────────────────
@@ -109,6 +173,8 @@ export interface AgentSession {
   output: OutputEntry[]
   artifacts: Artifact[]
   error?: string
+  provider?: Provider
+  mode?: AgentMode
 }
 
 export type AgentUpdate =
@@ -125,11 +191,15 @@ export interface SpawnConfig {
   model?: string
   prompt: string
   workspacePath: string
+  provider?: Provider
+  mode?: AgentMode
 }
 
 export interface AgentConfig {
   defaultModel: string
   hasApiKey: boolean
+  providers: Record<Provider, ProviderInfo>
+  settings: GravitySettings
 }
 
 export interface AgentAPI {
@@ -140,7 +210,18 @@ export interface AgentAPI {
   list: () => Promise<AgentListItem[]>
   getSession: (id: string) => Promise<AgentSession | null>
   setApiKey: (key: string) => Promise<void>
+  setProviderKey: (provider: Provider, key: string) => Promise<void>
+  getWorkflows: (workspacePath: string) => Promise<Workflow[]>
   onUpdate: (callback: (agentId: string, update: AgentUpdate) => void) => () => void
+}
+
+export interface SettingsAPI {
+  get: () => Promise<GravitySettings>
+  set: (settings: GravitySettings) => Promise<void>
+}
+
+export interface EditorAIAPI {
+  command: (prompt: string, context: string) => Promise<string>
 }
 
 export interface ElectronAPI {
@@ -153,6 +234,9 @@ export interface ElectronAPI {
   terminal: TerminalAPI
   browser: BrowserAPI
   agent: AgentAPI
+  settings: SettingsAPI
+  editorAI: EditorAIAPI
+  runConfig: RunConfigAPI
 }
 
 // ─── Electron WebviewTag interface for DOM usage ──────────────────────────────

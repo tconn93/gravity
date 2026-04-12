@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import TerminalPane from './TerminalPane'
 import MissionControl from './MissionControl'
-import type { TerminalSession, TerminalPolicy } from '../types'
+import RunPanel from './RunPanel'
+import type { TerminalSession, TerminalPolicy, RunConfig } from '../types'
 
 interface TerminalPanelProps {
   workspacePath: string | null
@@ -11,7 +12,7 @@ interface TerminalPanelProps {
   onPanelResize: (height: number) => void
 }
 
-type ActiveView = string | 'agent'
+type ActiveView = string | 'agent' | 'run'
 
 const MIN_HEIGHT = 120
 const MAX_HEIGHT = 600
@@ -28,6 +29,13 @@ export default function TerminalPanel({
   const [activeView, setActiveView] = useState<ActiveView>('agent')
   const [policy, setPolicy] = useState<TerminalPolicy>('turbo')
   const [sessionCounter, setSessionCounter] = useState(0)
+
+  // Load saved policy from settings on mount
+  useEffect(() => {
+    window.electronAPI?.settings?.get().then(s => {
+      if (s?.terminalPolicy) setPolicy(s.terminalPolicy)
+    }).catch(() => {})
+  }, [])
   const isDraggingRef = useRef(false)
   const dragStartYRef = useRef(0)
   const dragStartHeightRef = useRef(0)
@@ -58,6 +66,31 @@ export default function TerminalPanel({
   const markExited = useCallback((id: string) => {
     setSessions(prev => prev.map(s => s.id === id ? { ...s, isAlive: false } : s))
   }, [])
+
+  const handleRun = useCallback(async (config: RunConfig) => {
+    // Resolve working directory
+    const effectiveCwd = config.cwd && config.cwd !== '.'
+      ? (config.cwd.startsWith('/') ? config.cwd : `${cwd}/${config.cwd}`)
+      : cwd
+
+    const id = await window.electronAPI.terminal.create(effectiveCwd)
+    const num = sessionCounter + 1
+    setSessionCounter(num)
+    const session: TerminalSession = { id, label: config.name, isAlive: true }
+    setSessions(prev => [...prev, session])
+    setActiveView(id)
+    if (!isOpen) onToggle()
+
+    // Build command, prepending any env vars
+    const envPrefix = config.env && Object.keys(config.env).length > 0
+      ? Object.entries(config.env).map(([k, v]) => `${k}=${v}`).join(' ') + ' '
+      : ''
+    const fullCommand = envPrefix + config.command
+
+    setTimeout(() => {
+      window.electronAPI.terminal.write(id, fullCommand + '\r')
+    }, 300)
+  }, [cwd, sessionCounter, isOpen, onToggle])
 
   // Listen for native menu "New Terminal"
   useEffect(() => {
@@ -147,14 +180,14 @@ export default function TerminalPanel({
           {isOpen ? '▼' : '▶'}
         </button>
 
-        {/* Terminal session tabs */}
+        {/* Terminal session tabs — scrollable */}
         <div style={{ display: 'flex', alignItems: 'stretch', flex: 1, overflowX: 'auto', overflowY: 'hidden' }}>
           {sessions.map(session => {
             const isActive = activeView === session.id
             return (
               <div
                 key={session.id}
-                onClick={() => setActiveView(session.id)}
+                onClick={() => { setActiveView(session.id); if (!isOpen) onToggle() }}
                 style={{
                   display: 'flex',
                   alignItems: 'center',
@@ -209,10 +242,13 @@ export default function TerminalPanel({
           >
             +
           </button>
+        </div>
 
+        {/* Fixed right tabs — always visible regardless of terminal count */}
+        <div style={{ display: 'flex', alignItems: 'stretch', flexShrink: 0, borderLeft: '1px solid var(--border)' }}>
           {/* Agent Manager tab */}
           <div
-            onClick={() => setActiveView('agent')}
+            onClick={() => { setActiveView('agent'); if (!isOpen) onToggle() }}
             style={{
               display: 'flex',
               alignItems: 'center',
@@ -223,11 +259,31 @@ export default function TerminalPanel({
               borderRight: '1px solid var(--border)',
               fontSize: 'var(--font-size-sm)',
               color: activeView === 'agent' ? 'var(--text-primary)' : 'var(--text-secondary)',
-              flexShrink: 0
+              whiteSpace: 'nowrap'
             }}
           >
             <span style={{ fontSize: 12 }}>⚡</span>
-            <span>Agent Manager</span>
+            <span>Agents</span>
+          </div>
+
+          {/* Run tab */}
+          <div
+            onClick={() => { setActiveView('run'); if (!isOpen) onToggle() }}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              padding: '0 12px',
+              cursor: 'pointer',
+              background: activeView === 'run' ? 'var(--bg-secondary)' : 'transparent',
+              borderRight: '1px solid var(--border)',
+              fontSize: 'var(--font-size-sm)',
+              color: activeView === 'run' ? 'var(--text-primary)' : 'var(--text-secondary)',
+              whiteSpace: 'nowrap'
+            }}
+          >
+            <span style={{ fontSize: 11 }}>▶</span>
+            <span>Run</span>
           </div>
         </div>
 
@@ -293,6 +349,21 @@ export default function TerminalPanel({
             }}
           >
             <MissionControl workspacePath={workspacePath} />
+          </div>
+
+          {/* Run view */}
+          <div
+            style={{
+              position: 'absolute',
+              inset: 0,
+              visibility: activeView === 'run' ? 'visible' : 'hidden',
+              pointerEvents: activeView === 'run' ? 'auto' : 'none',
+              overflow: 'hidden',
+              display: 'flex',
+              flexDirection: 'column'
+            }}
+          >
+            <RunPanel workspacePath={workspacePath} onRun={handleRun} />
           </div>
         </div>
       )}

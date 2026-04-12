@@ -3,6 +3,7 @@ import { promises as fs } from 'fs'
 import { join, resolve, isAbsolute, dirname } from 'path'
 import { exec } from 'child_process'
 import { promisify } from 'util'
+import type { Provider, ProviderInfo, GravitySettings } from '../src/types'
 
 const execAsync = promisify(exec)
 
@@ -19,11 +20,60 @@ function htmlDecode(str: string): string {
     .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
 }
 
+// ─── Provider registry ────────────────────────────────────────────────────────
+
+export const PROVIDERS: Record<Provider, ProviderInfo> = {
+  xai: {
+    name: 'xAI (Grok)',
+    baseURL: 'https://api.x.ai/v1',
+    requiresKey: true,
+    envKey: 'XAI_API_KEY',
+    defaultModels: ['grok-code-fast-1', 'grok-3-fast', 'grok-3']
+  },
+  anthropic: {
+    name: 'Anthropic (Claude)',
+    baseURL: 'https://api.anthropic.com/v1/',
+    extraHeaders: { 'anthropic-version': '2023-06-01' },
+    requiresKey: true,
+    envKey: 'ANTHROPIC_API_KEY',
+    defaultModels: ['claude-sonnet-4-6', 'claude-opus-4-6', 'claude-haiku-4-5-20251001']
+  },
+  gemini: {
+    name: 'Google Gemini',
+    baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/',
+    requiresKey: true,
+    envKey: 'GEMINI_API_KEY',
+    defaultModels: ['gemini-2.0-flash', 'gemini-2.5-pro', 'gemini-1.5-pro']
+  },
+  openai: {
+    name: 'OpenAI',
+    baseURL: 'https://api.openai.com/v1',
+    requiresKey: true,
+    envKey: 'OPENAI_API_KEY',
+    defaultModels: ['gpt-4o', 'gpt-4o-mini', 'o3-mini']
+  },
+  ollama: {
+    name: 'Ollama (local)',
+    baseURL: 'http://localhost:11434/v1',
+    requiresKey: false,
+    envKey: '',
+    defaultModels: ['llama3.3', 'qwen2.5-coder', 'mistral']
+  },
+  deepseek: {
+    name: 'DeepSeek',
+    baseURL: 'https://api.deepseek.com',
+    requiresKey: true,
+    envKey: 'DEEPSEEK_API_KEY',
+    defaultModels: ['deepseek-chat', 'deepseek-reasoner']
+  }
+}
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export type AgentRole = 'architect' | 'developer' | 'validator' | 'custom'
 export type UltraworkPhase = 'plan' | 'act' | 'verify' | 'report' | 'done'
 export type AgentStatus = 'running' | 'done' | 'error' | 'cancelled'
+export type AgentMode = 'standard' | 'planning' | 'fast'
 
 export interface Artifact {
   id: string
@@ -53,6 +103,8 @@ export interface AgentSession {
   output: OutputEntry[]
   artifacts: Artifact[]
   error?: string
+  provider?: Provider
+  mode?: AgentMode
 }
 
 export interface AgentListItem {
@@ -81,11 +133,15 @@ export interface SpawnConfig {
   model?: string
   prompt: string
   workspacePath: string
+  provider?: Provider
+  mode?: AgentMode
 }
 
 export interface AgentConfig {
   defaultModel: string
   hasApiKey: boolean
+  providers: Record<Provider, ProviderInfo>
+  settings: GravitySettings
 }
 
 // ─── Internal session type (adds ephemeral fields not exposed publicly) ────────
@@ -93,6 +149,7 @@ export interface AgentConfig {
 type InternalSession = AgentSession & {
   abortController: AbortController
   messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[]
+  extraTools?: OpenAI.Chat.Completions.ChatCompletionTool[]
 }
 
 // ─── System prompts ───────────────────────────────────────────────────────────
@@ -202,6 +259,21 @@ const AGENT_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
   {
     type: 'function',
     function: {
+      name: 'search_codebase',
+      description: 'Search the workspace for files matching a query string. Returns up to 20 matches with context.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Text or pattern to search for' },
+          filePattern: { type: 'string', description: 'Optional glob-style file extension filter, e.g. "*.ts"' }
+        },
+        required: ['query']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
       name: 'set_phase',
       description: 'Update the current Ultrawork Loop phase.',
       parameters: {
@@ -267,6 +339,22 @@ const AGENT_TOOLS: OpenAI.Chat.Completions.ChatCompletionTool[] = [
   }
 ]
 
+const RUN_SKILL_TOOL: OpenAI.Chat.Completions.ChatCompletionTool = {
+  type: 'function',
+  function: {
+    name: 'run_skill',
+    description: 'Run a custom skill script from .agent/skills/.',
+    parameters: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Script filename (e.g. "generate-docs.py")' },
+        args: { type: 'string', description: 'Arguments to pass to the script' }
+      },
+      required: ['name']
+    }
+  }
+}
+
 // ─── Communication logger ─────────────────────────────────────────────────────
 
 const COMM_DIR = resolve(__dirname, '../../communication')
@@ -301,6 +389,7 @@ async function saveCommLog(
       `| Agent ID | ${session.id} |`,
       `| Role | ${session.role} |`,
       `| Model | ${session.model} |`,
+      `| Provider | ${session.provider ?? 'xai'} |`,
       `| Status | ${session.status} |`,
       `| Workspace | ${session.workspacePath} |`,
       `| Spawned | ${new Date(session.createdAt).toISOString()} |`,
@@ -333,9 +422,10 @@ async function saveCommLog(
         if (tc?.length) {
           lines.push(``, `**Tool Calls:**`)
           for (const call of tc) {
-            lines.push(``, `- \`${call.function.name}\``, '```json')
-            try { lines.push(JSON.stringify(JSON.parse(call.function.arguments), null, 2)) }
-            catch { lines.push(call.function.arguments) }
+            const fn = (call as { function: { name: string; arguments: string } }).function
+            lines.push(``, `- \`${fn.name}\``, '```json')
+            try { lines.push(JSON.stringify(JSON.parse(fn.arguments), null, 2)) }
+            catch { lines.push(fn.arguments) }
             lines.push('```')
           }
         }
@@ -359,26 +449,52 @@ async function saveCommLog(
 export class AgentManager {
   private sessions = new Map<string, InternalSession>()
   private counter = 0
-  // _manualApiKey is set via the UI; falls back to env var at call time (not init time)
-  private _manualApiKey: string | null = null
+  private _apiKeys = new Map<Provider, string>()
   private onUpdate: (agentId: string, update: AgentUpdate) => void = () => {}
 
-  private get effectiveApiKey(): string | null {
-    return this._manualApiKey ?? process.env.XAI_API_KEY?.trim() ?? null
+  private effectiveApiKey(provider: Provider): string | null {
+    const manual = this._apiKeys.get(provider)
+    if (manual) return manual
+    const info = PROVIDERS[provider]
+    if (!info.requiresKey) return 'no-key'
+    const envVal = info.envKey ? process.env[info.envKey]?.trim() : undefined
+    return envVal ?? null
   }
 
   setApiKey(key: string) {
-    this._manualApiKey = key.trim() || null
+    // Legacy: sets xai key
+    this._apiKeys.set('xai', key.trim() || '')
   }
 
-  hasApiKey(): boolean {
-    return !!this.effectiveApiKey
+  setProviderKey(provider: Provider, key: string) {
+    if (key.trim()) {
+      this._apiKeys.set(provider, key.trim())
+    } else {
+      this._apiKeys.delete(provider)
+    }
+  }
+
+  hasApiKey(provider: Provider = 'xai'): boolean {
+    return !!this.effectiveApiKey(provider)
   }
 
   getConfig(): AgentConfig {
+    const defaultProvider: Provider = 'xai'
+    const settings: GravitySettings = {
+      providers: Object.fromEntries(
+        Array.from(this._apiKeys.entries()).map(([k, v]) => [k, v])
+      ) as Partial<Record<Provider, string>>,
+      defaultProvider,
+      defaultModel: process.env.XAI_DEFAULT_MODEL ?? 'grok-code-fast-1',
+      terminalPolicy: 'turbo',
+      aiCompletionEnabled: false
+    }
     return {
       defaultModel: process.env.XAI_DEFAULT_MODEL ?? 'grok-code-fast-1',
-      hasApiKey: this.hasApiKey()
+      hasApiKey: this.hasApiKey('xai') || this.hasApiKey('anthropic') || this.hasApiKey('openai') ||
+        this.hasApiKey('gemini') || this.hasApiKey('deepseek') || this.hasApiKey('ollama'),
+      providers: PROVIDERS,
+      settings
     }
   }
 
@@ -386,13 +502,34 @@ export class AgentManager {
     this.onUpdate = cb
   }
 
-  spawn(config: SpawnConfig): { id: string } | { error: string } {
-    if (!this.effectiveApiKey) {
-      return { error: 'No API key. Set XAI_API_KEY in .env or enter it in Mission Control.' }
+  async spawn(config: SpawnConfig): Promise<{ id: string } | { error: string }> {
+    const provider: Provider = config.provider ?? 'xai'
+    if (!this.effectiveApiKey(provider)) {
+      return { error: `No API key for provider "${PROVIDERS[provider].name}". Set it in Settings or .env.` }
     }
     const id = String(++this.counter)
-    const model = config.model ?? (process.env.XAI_DEFAULT_MODEL ?? 'grok-code-fast-1')
-    const systemPrompt = SYSTEM_PROMPTS[config.role].replace('{workspacePath}', config.workspacePath)
+    const defaultModel = PROVIDERS[provider].defaultModels[0]
+    const model = config.model ?? defaultModel
+    let systemPrompt = SYSTEM_PROMPTS[config.role].replace('{workspacePath}', config.workspacePath)
+
+    // Inject .agent/rules/
+    const rulesContent = await this.loadRules(config.workspacePath)
+    if (rulesContent) {
+      systemPrompt = `## RULES\n\n${rulesContent}\n\n---\n\n${systemPrompt}`
+    }
+
+    // Mode modifications
+    if (config.mode === 'planning') {
+      systemPrompt += '\n\nOnly plan — create task lists and implementation plans. Do NOT write any code files.'
+    }
+
+    // Load skills
+    const extraTools: OpenAI.Chat.Completions.ChatCompletionTool[] = []
+    const hasSkills = await this.hasSkills(config.workspacePath)
+    if (hasSkills) {
+      extraTools.push(RUN_SKILL_TOOL)
+    }
+
     const session: InternalSession = {
       id,
       role: config.role,
@@ -402,6 +539,8 @@ export class AgentManager {
       phase: 'plan',
       status: 'running',
       createdAt: Date.now(),
+      provider,
+      mode: config.mode ?? 'standard',
       output: [
         { type: 'user', content: config.prompt, timestamp: Date.now() }
       ],
@@ -410,7 +549,8 @@ export class AgentManager {
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: config.prompt }
-      ]
+      ],
+      extraTools
     }
     this.sessions.set(id, session)
     this.runLoop(session).catch(err => {
@@ -425,7 +565,9 @@ export class AgentManager {
     const session = this.sessions.get(id)
     if (!session) return { error: 'Session not found' }
     if (session.status === 'running') return { error: 'Session is already running' }
-    if (!this.effectiveApiKey) return { error: 'No API key configured' }
+
+    const provider = session.provider ?? 'xai'
+    if (!this.effectiveApiKey(provider)) return { error: 'No API key configured' }
 
     // Reset state for continuation
     session.status = 'running'
@@ -485,21 +627,95 @@ export class AgentManager {
       createdAt: s.createdAt,
       output: s.output,
       artifacts: s.artifacts,
-      error: s.error
+      error: s.error,
+      provider: s.provider,
+      mode: s.mode
+    }
+  }
+
+  // ── One-shot AI call for editor commands ──────────────────────────────────
+
+  async oneShot(prompt: string, context: string): Promise<string> {
+    // Pick first available provider
+    const providers: Provider[] = ['xai', 'anthropic', 'openai', 'gemini', 'deepseek', 'ollama']
+    let chosenProvider: Provider = 'xai'
+    for (const p of providers) {
+      if (this.effectiveApiKey(p)) { chosenProvider = p; break }
+    }
+    const key = this.effectiveApiKey(chosenProvider)
+    if (!key) return '// No AI provider configured'
+
+    const prov = PROVIDERS[chosenProvider]
+    const client = new OpenAI({
+      apiKey: key,
+      baseURL: prov.baseURL,
+      defaultHeaders: prov.extraHeaders ?? {}
+    })
+
+    try {
+      const response = await client.chat.completions.create({
+        model: prov.defaultModels[0],
+        max_tokens: 2048,
+        messages: [
+          { role: 'system', content: 'You are a code assistant. Respond with ONLY the code or text requested — no explanation, no markdown fences unless explicitly asked.' },
+          { role: 'user', content: `Context:\n${context}\n\nRequest: ${prompt}` }
+        ]
+      })
+      return response.choices[0]?.message?.content ?? ''
+    } catch (err) {
+      return `// Error: ${err instanceof Error ? err.message : String(err)}`
+    }
+  }
+
+  // ── Rules loader ──────────────────────────────────────────────────────────
+
+  private async loadRules(workspacePath: string): Promise<string> {
+    const rulesDir = join(workspacePath, '.agent', 'rules')
+    try {
+      const entries = await fs.readdir(rulesDir, { withFileTypes: true })
+      const parts: string[] = []
+      for (const entry of entries) {
+        if (entry.isFile() && (entry.name.endsWith('.md') || entry.name.endsWith('.txt'))) {
+          try {
+            const content = await fs.readFile(join(rulesDir, entry.name), 'utf-8')
+            parts.push(`### ${entry.name}\n\n${content.trim()}`)
+          } catch { /* skip */ }
+        }
+      }
+      return parts.join('\n\n')
+    } catch {
+      return ''
+    }
+  }
+
+  // ── Skills checker ────────────────────────────────────────────────────────
+
+  private async hasSkills(workspacePath: string): Promise<boolean> {
+    const skillsDir = join(workspacePath, '.agent', 'skills')
+    try {
+      const entries = await fs.readdir(skillsDir, { withFileTypes: true })
+      return entries.some(e => e.isFile() && (e.name.endsWith('.py') || e.name.endsWith('.sh')))
+    } catch {
+      return false
     }
   }
 
   // ── Agentic loop ──────────────────────────────────────────────────────────
 
   private async runLoop(session: InternalSession) {
+    const provider: Provider = session.provider ?? 'xai'
+    const prov = PROVIDERS[provider]
     const client = new OpenAI({
-      apiKey: this.effectiveApiKey!,
-      baseURL: 'https://api.x.ai/v1'
+      apiKey: this.effectiveApiKey(provider) ?? 'no-key',
+      baseURL: prov.baseURL,
+      defaultHeaders: prov.extraHeaders ?? {}
     })
 
     const saveComms = (process.env.SAVE_LLM_COMMUNICATION ?? '').toLowerCase() === 'true'
-    const MAX_TURNS = 40
+    const MAX_TURNS = session.mode === 'fast' ? 10 : 40
     let turns = 0
+
+    const tools = [...AGENT_TOOLS, ...(session.extraTools ?? [])]
 
     while (turns < MAX_TURNS) {
       if (session.abortController.signal.aborted) break
@@ -510,7 +726,7 @@ export class AgentManager {
         model: session.model,
         max_tokens: 8192,
         messages: session.messages,
-        tools: AGENT_TOOLS
+        tools
       })
 
       stream.on('content', (delta: string) => {
@@ -611,6 +827,9 @@ export class AgentManager {
           const out = [stdout, stderr ? `STDERR:\n${stderr}` : ''].filter(Boolean).join('\n').trim()
           return { content: out || '(no output)', isError: false }
         }
+        case 'search_codebase': {
+          return this.searchCodebase(session.workspacePath, input.query as string, input.filePattern as string | undefined)
+        }
         case 'set_phase': {
           const phase = input.phase as UltraworkPhase
           session.phase = phase
@@ -639,12 +858,77 @@ export class AgentManager {
           await fs.writeFile(p, input.content as string, 'utf-8')
           return { content: 'progress.md updated', isError: false }
         }
+        case 'run_skill': {
+          const skillName = input.name as string
+          const skillArgs = (input.args as string) ?? ''
+          const skillPath = join(session.workspacePath, '.agent', 'skills', skillName)
+          const isPy = skillName.endsWith('.py')
+          const cmd = isPy ? `python "${skillPath}" ${skillArgs}` : `bash "${skillPath}" ${skillArgs}`
+          const { stdout, stderr } = await execAsync(cmd, {
+            cwd: session.workspacePath,
+            timeout: 30_000,
+            env: { ...process.env }
+          })
+          const out = [stdout, stderr ? `STDERR:\n${stderr}` : ''].filter(Boolean).join('\n').trim()
+          return { content: out || '(no output)', isError: false }
+        }
         default:
           return { content: `Unknown tool: ${toolName}`, isError: true }
       }
     } catch (err) {
       return { content: `Error: ${err instanceof Error ? err.message : String(err)}`, isError: true }
     }
+  }
+
+  // ── search_codebase implementation ────────────────────────────────────────
+
+  private async searchCodebase(
+    workspacePath: string,
+    query: string,
+    filePattern?: string
+  ): Promise<{ content: string; isError: boolean }> {
+    const results: string[] = []
+    const MAX_RESULTS = 20
+
+    const extFilter = filePattern
+      ? filePattern.replace(/\*/g, '').replace(/\./g, '').toLowerCase()
+      : null
+
+    const searchDir = async (dir: string, depth: number) => {
+      if (depth > 8 || results.length >= MAX_RESULTS) return
+      try {
+        const entries = await fs.readdir(dir, { withFileTypes: true })
+        for (const entry of entries) {
+          if (results.length >= MAX_RESULTS) break
+          if (entry.name.startsWith('.') || entry.name === 'node_modules') continue
+          const fullPath = join(dir, entry.name)
+          if (entry.isDirectory()) {
+            await searchDir(fullPath, depth + 1)
+          } else if (entry.isFile()) {
+            if (extFilter && !entry.name.toLowerCase().endsWith(extFilter)) continue
+            try {
+              const content = await fs.readFile(fullPath, 'utf-8')
+              const lines = content.split('\n')
+              for (let i = 0; i < lines.length; i++) {
+                if (lines[i].toLowerCase().includes(query.toLowerCase())) {
+                  const start = Math.max(0, i - 1)
+                  const end = Math.min(lines.length - 1, i + 1)
+                  const context = lines.slice(start, end + 1).map((l, idx) =>
+                    `${start + idx + 1}: ${l}`
+                  ).join('\n')
+                  results.push(`${fullPath}:${i + 1}\n${context}`)
+                  if (results.length >= MAX_RESULTS) break
+                }
+              }
+            } catch { /* skip binary files */ }
+          }
+        }
+      } catch { /* skip unreadable dirs */ }
+    }
+
+    await searchDir(workspacePath, 0)
+    if (results.length === 0) return { content: 'No matches found.', isError: false }
+    return { content: results.join('\n\n---\n\n'), isError: false }
   }
 
   private resolvePath(workspacePath: string, inputPath: string): string {

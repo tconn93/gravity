@@ -8,7 +8,10 @@ import type {
   AgentSession,
   Artifact,
   OutputEntry,
-  SpawnConfig
+  SpawnConfig,
+  Provider,
+  AgentMode,
+  Workflow
 } from '../types'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -33,6 +36,15 @@ const STATUS_COLORS: Record<string, string> = {
   done: '#6a9955',
   error: '#f44747',
   cancelled: '#808080'
+}
+
+const PROVIDER_LABELS: Record<Provider, string> = {
+  xai: 'xAI (Grok)',
+  anthropic: 'Anthropic',
+  gemini: 'Gemini',
+  openai: 'OpenAI',
+  ollama: 'Ollama',
+  deepseek: 'DeepSeek'
 }
 
 const INPUT_STYLE: React.CSSProperties = {
@@ -80,29 +92,36 @@ function Markdown({ content }: { content: string }) {
   )
 }
 
-// ─── ApiKeyPrompt ─────────────────────────────────────────────────────────────
+// ─── ApiKeyPrompt (multi-provider) ────────────────────────────────────────────
 
-function ApiKeyPrompt({ onSave }: { onSave: (key: string) => void }) {
-  const [value, setValue] = useState('')
+function ApiKeyPrompt({ config, onSave }: { config: AgentConfig | null; onSave: (provider: Provider, key: string) => void }) {
+  const [keys, setKeys] = useState<Partial<Record<Provider, string>>>({})
+  const providers: Provider[] = ['xai', 'anthropic', 'openai', 'gemini', 'deepseek']
+
   return (
-    <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 10 }}>
+    <div style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 12 }}>
       <div style={{ color: 'var(--text-secondary)', fontSize: 12 }}>
-        No <code>XAI_API_KEY</code> found. Enter your xAI API key to enable agents.
+        No API key found. Enter a key for at least one provider to enable agents.
       </div>
-      <div style={{ display: 'flex', gap: 8 }}>
-        <input
-          type="password"
-          placeholder="xai-..."
-          value={value}
-          onChange={e => setValue(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter' && value.trim()) onSave(value.trim()) }}
-          style={{ ...INPUT_STYLE, flex: 1 }}
-          autoFocus
-        />
-        <button onClick={() => { if (value.trim()) onSave(value.trim()) }} style={BTN_PRIMARY}>
-          Save
-        </button>
-      </div>
+      {providers.map(p => (
+        <div key={p} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <span style={{ fontSize: 11, color: 'var(--text-muted)', width: 100, flexShrink: 0 }}>{PROVIDER_LABELS[p]}</span>
+          <input
+            type="password"
+            placeholder={p === 'xai' ? 'xai-...' : 'API key…'}
+            value={keys[p] ?? ''}
+            onChange={e => setKeys(prev => ({ ...prev, [p]: e.target.value }))}
+            onKeyDown={e => { if (e.key === 'Enter' && keys[p]?.trim()) onSave(p, keys[p]!.trim()) }}
+            style={{ ...INPUT_STYLE, flex: 1 }}
+          />
+          <button
+            onClick={() => { if (keys[p]?.trim()) onSave(p, keys[p]!.trim()) }}
+            style={{ ...BTN_PRIMARY, padding: '6px 10px' }}
+          >
+            Save
+          </button>
+        </div>
+      ))}
     </div>
   )
 }
@@ -111,32 +130,53 @@ function ApiKeyPrompt({ onSave }: { onSave: (key: string) => void }) {
 
 function SpawnForm({
   workspacePath,
-  defaultModel,
+  config,
+  workflows,
   onSpawn,
   onCancel
 }: {
   workspacePath: string | null
-  defaultModel: string
-  onSpawn: (config: SpawnConfig) => void
+  config: AgentConfig
+  workflows: Workflow[]
+  onSpawn: (cfg: SpawnConfig) => void
   onCancel?: () => void
 }) {
   const [role, setRole] = useState<AgentRole>('developer')
-  const [model, setModel] = useState(defaultModel)
+  const [provider, setProvider] = useState<Provider>(config.settings.defaultProvider ?? 'xai')
+  const [model, setModel] = useState(config.defaultModel)
+  const [customModel, setCustomModel] = useState('')
+  const [useCustomModel, setUseCustomModel] = useState(false)
   const [prompt, setPrompt] = useState('')
+  const [mode, setMode] = useState<AgentMode>('standard')
 
-  useEffect(() => { setModel(defaultModel) }, [defaultModel])
+  const providerModels = config.providers[provider]?.defaultModels ?? []
 
-  const canSubmit = prompt.trim().length > 0 && !!workspacePath
+  // When provider changes, reset model
+  useEffect(() => {
+    const defaultModel = config.providers[provider]?.defaultModels[0] ?? config.defaultModel
+    setModel(defaultModel)
+    setUseCustomModel(false)
+  }, [provider, config])
+
+  const effectiveModel = useCustomModel ? customModel.trim() : model
+
+  const canSubmit = prompt.trim().length > 0 && !!workspacePath && !!effectiveModel
 
   const handleSubmit = () => {
     if (!canSubmit) return
-    onSpawn({ role, model: model.trim() || defaultModel, prompt: prompt.trim(), workspacePath: workspacePath! })
+    onSpawn({ role, model: effectiveModel, prompt: prompt.trim(), workspacePath: workspacePath!, provider, mode })
     setPrompt('')
+  }
+
+  const handleWorkflowSpawn = (wf: Workflow) => {
+    if (!workspacePath) return
+    onSpawn({ role: wf.role, model: effectiveModel, prompt: wf.prompt, workspacePath, provider, mode })
   }
 
   return (
     <div style={{ padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 8, borderTop: '1px solid var(--border)' }}>
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+      {/* Row 1: Role + Provider + Mode */}
+      <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
         <select
           value={role}
           onChange={e => setRole(e.target.value as AgentRole)}
@@ -146,16 +186,94 @@ function SpawnForm({
             <option key={r} value={r}>{ROLE_ICONS[r]} {r}</option>
           ))}
         </select>
-        <input
-          value={model}
-          onChange={e => setModel(e.target.value)}
-          style={{ ...INPUT_STYLE, width: 170, padding: '4px 8px', fontSize: 11 }}
-        />
+
+        <select
+          value={provider}
+          onChange={e => setProvider(e.target.value as Provider)}
+          style={{ ...INPUT_STYLE, padding: '4px 8px', fontSize: 11, cursor: 'pointer' }}
+        >
+          {(Object.keys(PROVIDER_LABELS) as Provider[]).map(p => (
+            <option key={p} value={p}>{PROVIDER_LABELS[p]}</option>
+          ))}
+        </select>
+
+        {/* Mode segmented control */}
+        <div style={{ display: 'flex', background: 'var(--bg-tertiary)', borderRadius: 4, border: '1px solid var(--border)', overflow: 'hidden' }}>
+          {(['standard', 'planning', 'fast'] as AgentMode[]).map(m => (
+            <button
+              key={m}
+              onClick={() => setMode(m)}
+              style={{
+                padding: '4px 8px',
+                fontSize: 10,
+                fontWeight: mode === m ? 600 : 400,
+                background: mode === m ? 'var(--accent)' : 'transparent',
+                color: mode === m ? '#fff' : 'var(--text-muted)',
+                borderRight: m !== 'fast' ? '1px solid var(--border)' : 'none',
+                cursor: 'pointer',
+                transition: 'all 0.1s'
+              }}
+            >
+              {m === 'standard' ? 'Std' : m === 'planning' ? 'Plan' : 'Fast'}
+            </button>
+          ))}
+        </div>
+
         {!workspacePath && <span style={{ color: '#f44747', fontSize: 11 }}>Open a folder first</span>}
         {onCancel && (
           <button onClick={onCancel} style={{ ...BTN_GHOST, marginLeft: 'auto' }}>Cancel</button>
         )}
       </div>
+
+      {/* Row 2: Model selector */}
+      <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+        {!useCustomModel ? (
+          <select
+            value={model}
+            onChange={e => {
+              if (e.target.value === '__custom__') { setUseCustomModel(true) }
+              else setModel(e.target.value)
+            }}
+            style={{ ...INPUT_STYLE, padding: '4px 8px', fontSize: 11, flex: 1, cursor: 'pointer' }}
+          >
+            {providerModels.map(m => (
+              <option key={m} value={m}>{m}</option>
+            ))}
+            <option value="__custom__">Other…</option>
+          </select>
+        ) : (
+          <div style={{ display: 'flex', gap: 4, flex: 1 }}>
+            <input
+              value={customModel}
+              onChange={e => setCustomModel(e.target.value)}
+              placeholder="Enter model name…"
+              style={{ ...INPUT_STYLE, flex: 1, padding: '4px 8px', fontSize: 11 }}
+              autoFocus
+            />
+            <button onClick={() => { setUseCustomModel(false); setCustomModel('') }} style={BTN_GHOST}>↩</button>
+          </div>
+        )}
+      </div>
+
+      {/* Row 3: Workflow quick-spawn */}
+      {workflows.length > 0 && (
+        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', alignItems: 'center' }}>
+          <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>Workflows:</span>
+          {workflows.map(wf => (
+            <button
+              key={wf.name}
+              onClick={() => handleWorkflowSpawn(wf)}
+              title={wf.description}
+              style={{ ...BTN_GHOST, fontSize: 10, padding: '2px 6px' }}
+              disabled={!workspacePath}
+            >
+              {wf.name}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Row 4: Prompt + spawn */}
       <div style={{ display: 'flex', gap: 8 }}>
         <textarea
           value={prompt}
@@ -284,7 +402,6 @@ function ToolBlock({ entry }: { entry: OutputEntry }) {
   const bg = isCall ? 'rgba(86,156,214,0.07)' : isError ? 'rgba(244,71,71,0.07)' : 'rgba(78,201,176,0.07)'
   const icon = isCall ? '⚙' : isError ? '✗' : '✓'
 
-  // Summary: first non-empty line of content, truncated
   const firstLine = entry.content.split('\n').find(l => l.trim()) ?? ''
   const summary = firstLine.length > 90 ? firstLine.slice(0, 90) + '…' : firstLine
 
@@ -354,7 +471,6 @@ function OutputLine({ entry }: { entry: OutputEntry }) {
     )
   }
 
-  // 'system' — used for any other internal messages
   if (entry.type === 'system') {
     return (
       <div style={{ margin: '4px 0', fontSize: 11, color: 'var(--text-secondary)', fontStyle: 'italic' }}>
@@ -437,6 +553,16 @@ function SessionDetail({ session, streaming }: { session: AgentSession; streamin
         <span style={{ fontSize: 12, fontWeight: 600 }}>{ROLE_ICONS[session.role]} {session.role} #{session.id}</span>
         <span style={{ fontSize: 11, fontFamily: 'monospace', color: PHASE_COLORS[session.phase] ?? 'var(--text-secondary)' }}>{session.phase}</span>
         <span style={{ fontSize: 11, color: STATUS_COLORS[session.status] ?? 'var(--text-secondary)' }}>{session.status}</span>
+        {session.provider && (
+          <span style={{ fontSize: 10, color: 'var(--text-muted)', background: 'var(--bg-tertiary)', padding: '1px 6px', borderRadius: 10 }}>
+            {PROVIDER_LABELS[session.provider]}
+          </span>
+        )}
+        {session.mode && session.mode !== 'standard' && (
+          <span style={{ fontSize: 10, color: 'var(--text-muted)', background: 'var(--bg-tertiary)', padding: '1px 6px', borderRadius: 10 }}>
+            {session.mode}
+          </span>
+        )}
         <span style={{ fontSize: 10, color: 'var(--text-secondary)', marginLeft: 'auto' }}>{session.model}</span>
       </div>
 
@@ -469,6 +595,7 @@ export default function MissionControl({ workspacePath }: { workspacePath: strin
   const [session, setSession] = useState<AgentSession | null>(null)
   const [streamingText, setStreamingText] = useState<Record<string, string>>({})
   const [bottomMode, setBottomMode] = useState<'chat' | 'spawn'>('spawn')
+  const [workflows, setWorkflows] = useState<Workflow[]>([])
 
   const selectedIdRef = useRef<string | null>(null)
   selectedIdRef.current = selectedId
@@ -480,8 +607,14 @@ export default function MissionControl({ workspacePath }: { workspacePath: strin
     api?.getConfig().then(setConfig)
   }, [api])
 
-  const handleSaveKey = async (key: string) => {
-    await api?.setApiKey(key)
+  // Load workflows when workspace changes
+  useEffect(() => {
+    if (!workspacePath || !api?.getWorkflows) return
+    api.getWorkflows(workspacePath).then(setWorkflows).catch(() => setWorkflows([]))
+  }, [api, workspacePath])
+
+  const handleSaveKey = async (provider: Provider, key: string) => {
+    await api?.setProviderKey(provider, key)
     const cfg = await api?.getConfig()
     if (cfg) setConfig(cfg)
   }
@@ -498,7 +631,7 @@ export default function MissionControl({ workspacePath }: { workspacePath: strin
     return () => clearInterval(t)
   }, [refreshList])
 
-  // Streaming updates — registered once, ref for selectedId avoids stale closures
+  // Streaming updates
   useEffect(() => {
     if (!api) return
     return api.onUpdate((agentId, update) => {
@@ -567,7 +700,7 @@ export default function MissionControl({ workspacePath }: { workspacePath: strin
     return <div style={{ padding: 20, color: 'var(--text-secondary)', fontSize: 12 }}>Loading…</div>
   }
   if (!config.hasApiKey) {
-    return <ApiKeyPrompt onSave={handleSaveKey} />
+    return <ApiKeyPrompt config={config} onSave={handleSaveKey} />
   }
 
   return (
@@ -609,7 +742,8 @@ export default function MissionControl({ workspacePath }: { workspacePath: strin
       ) : (
         <SpawnForm
           workspacePath={workspacePath}
-          defaultModel={config.defaultModel}
+          config={config}
+          workflows={workflows}
           onSpawn={handleSpawn}
           onCancel={agents.length > 0 ? () => setBottomMode('chat') : undefined}
         />

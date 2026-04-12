@@ -32,9 +32,47 @@ export interface TerminalAPI {
   onNewTerminal: (callback: () => void) => () => void
 }
 
+export type Provider = 'xai' | 'anthropic' | 'gemini' | 'openai' | 'ollama' | 'deepseek'
 export type AgentRole = 'architect' | 'developer' | 'validator' | 'custom'
 export type UltraworkPhase = 'plan' | 'act' | 'verify' | 'report' | 'done'
 export type AgentStatus = 'running' | 'done' | 'error' | 'cancelled'
+export type AgentMode = 'standard' | 'planning' | 'fast'
+
+export interface ProviderInfo {
+  name: string
+  baseURL: string
+  extraHeaders?: Record<string, string>
+  requiresKey: boolean
+  envKey: string
+  defaultModels: string[]
+}
+
+export interface GravitySettings {
+  providers: Partial<Record<Provider, string>>
+  defaultProvider: Provider
+  defaultModel: string
+  terminalPolicy: 'turbo' | 'review'
+  aiCompletionEnabled: boolean
+}
+
+export interface Workflow {
+  name: string
+  description: string
+  role: AgentRole
+  prompt: string
+}
+
+export interface McpConnectionConfig {
+  name: string
+  command: string
+  args?: string[]
+}
+
+export interface McpConnection extends McpConnectionConfig {
+  status: 'stopped' | 'starting' | 'running' | 'error'
+  port?: number
+  pid?: number
+}
 
 export interface Artifact {
   id: string
@@ -76,6 +114,8 @@ export interface AgentSession {
   output: OutputEntry[]
   artifacts: Artifact[]
   error?: string
+  provider?: Provider
+  mode?: AgentMode
 }
 
 export type AgentUpdate =
@@ -92,11 +132,15 @@ export interface SpawnConfig {
   model?: string
   prompt: string
   workspacePath: string
+  provider?: Provider
+  mode?: AgentMode
 }
 
 export interface AgentConfig {
   defaultModel: string
   hasApiKey: boolean
+  providers: Record<Provider, ProviderInfo>
+  settings: GravitySettings
 }
 
 export interface AgentAPI {
@@ -107,6 +151,8 @@ export interface AgentAPI {
   list: () => Promise<AgentListItem[]>
   getSession: (id: string) => Promise<AgentSession | null>
   setApiKey: (key: string) => Promise<void>
+  setProviderKey: (provider: Provider, key: string) => Promise<void>
+  getWorkflows: (workspacePath: string) => Promise<Workflow[]>
   onUpdate: (callback: (agentId: string, update: AgentUpdate) => void) => () => void
 }
 
@@ -129,7 +175,34 @@ export interface BrowserAPI {
     status: () => Promise<{ running: boolean; port: number | null }>
     onLog: (callback: (line: string) => void) => () => void
     onStopped: (callback: (code: number | null) => void) => () => void
+    addConnection: (cfg: McpConnectionConfig) => Promise<IpcResult>
+    removeConnection: (name: string) => Promise<IpcResult>
+    listConnections: () => Promise<McpConnection[]>
   }
+}
+
+export interface SettingsAPI {
+  get: () => Promise<GravitySettings>
+  set: (settings: GravitySettings) => Promise<void>
+}
+
+export interface EditorAIAPI {
+  command: (prompt: string, context: string) => Promise<string>
+}
+
+export interface RunConfig {
+  id: string
+  name: string
+  command: string
+  cwd?: string
+  env?: Record<string, string>
+}
+
+export interface RunConfigAPI {
+  list: (workspacePath: string) => Promise<RunConfig[]>
+  save: (workspacePath: string, config: RunConfig) => Promise<void>
+  delete: (workspacePath: string, id: string) => Promise<void>
+  detectNpm: (workspacePath: string) => Promise<RunConfig[]>
 }
 
 export interface ElectronAPI {
@@ -142,6 +215,9 @@ export interface ElectronAPI {
   terminal: TerminalAPI
   browser: BrowserAPI
   agent: AgentAPI
+  settings: SettingsAPI
+  editorAI: EditorAIAPI
+  runConfig: RunConfigAPI
 }
 
 // ─── Implementation ───────────────────────────────────────────────────────────
@@ -196,7 +272,10 @@ const electronAPI: ElectronAPI = {
       stop: () => ipcRenderer.invoke('mcp:stop'),
       status: () => ipcRenderer.invoke('mcp:status'),
       onLog: (cb) => on('mcp:log', (_e, line) => cb(line as string)),
-      onStopped: (cb) => on('mcp:stopped', (_e, code) => cb(code as number | null))
+      onStopped: (cb) => on('mcp:stopped', (_e, code) => cb(code as number | null)),
+      addConnection: (cfg) => ipcRenderer.invoke('mcp:addConnection', cfg),
+      removeConnection: (name) => ipcRenderer.invoke('mcp:removeConnection', name),
+      listConnections: () => ipcRenderer.invoke('mcp:listConnections')
     }
   },
 
@@ -209,7 +288,28 @@ const electronAPI: ElectronAPI = {
     list: () => ipcRenderer.invoke('agent:list'),
     getSession: (id) => ipcRenderer.invoke('agent:getSession', id),
     setApiKey: (key) => ipcRenderer.invoke('agent:setApiKey', key),
+    setProviderKey: (provider, key) => ipcRenderer.invoke('agent:setProviderKey', provider, key),
+    getWorkflows: (workspacePath) => ipcRenderer.invoke('agent:readWorkflows', workspacePath),
     onUpdate: (cb) => on('agent:update', (_e, agentId, update) => cb(agentId as string, update as AgentUpdate))
+  },
+
+  // Settings
+  settings: {
+    get: () => ipcRenderer.invoke('settings:get'),
+    set: (settings) => ipcRenderer.invoke('settings:set', settings)
+  },
+
+  // Editor AI
+  editorAI: {
+    command: (prompt, context) => ipcRenderer.invoke('editor:aiCommand', prompt, context)
+  },
+
+  // Run configurations
+  runConfig: {
+    list: (workspacePath) => ipcRenderer.invoke('runConfig:list', workspacePath),
+    save: (workspacePath, config) => ipcRenderer.invoke('runConfig:save', workspacePath, config),
+    delete: (workspacePath, id) => ipcRenderer.invoke('runConfig:delete', workspacePath, id),
+    detectNpm: (workspacePath) => ipcRenderer.invoke('runConfig:detectNpm', workspacePath)
   }
 }
 

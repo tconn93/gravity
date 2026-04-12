@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
-import Editor from '@monaco-editor/react'
+import { useEffect, useRef, useState, useCallback } from 'react'
+import Editor, { type Monaco } from '@monaco-editor/react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { EditorTab } from '../types'
@@ -35,6 +35,8 @@ function isMarkdown(path: string): boolean {
   return path.split('.').pop()?.toLowerCase() === 'md'
 }
 
+type EditorInstance = Parameters<NonNullable<Parameters<typeof Editor>[0]['onMount']>>[0]
+
 export default function EditorPane({
   tabs,
   activeTabPath,
@@ -44,8 +46,19 @@ export default function EditorPane({
   onSave
 }: EditorPaneProps) {
   const activeTab = tabs.find(t => t.path === activeTabPath) ?? null
-  const editorRef = useRef<Parameters<NonNullable<Parameters<typeof Editor>[0]['onMount']>>[0] | null>(null)
+  const editorRef = useRef<EditorInstance | null>(null)
+  const monacoRef = useRef<Monaco | null>(null)
   const [previewOpen, setPreviewOpen] = useState(false)
+
+  // Cmd+I overlay state
+  const [cmdIOpen, setCmdIOpen] = useState(false)
+  const [cmdIQuery, setCmdIQuery] = useState('')
+  const [cmdILoading, setCmdILoading] = useState(false)
+  const cmdIInputRef = useRef<HTMLInputElement>(null)
+
+  // Debounce ref for AI completion
+  const completionDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const completionProviderRef = useRef<{ dispose: () => void } | null>(null)
 
   // Close preview whenever the active tab is not a markdown file
   useEffect(() => {
@@ -66,12 +79,131 @@ export default function EditorPane({
     return () => window.removeEventListener('keydown', handler)
   }, [activeTabPath, onSave])
 
+  // Cmd+I handler
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'i') {
+        e.preventDefault()
+        setCmdIOpen(v => !v)
+        setCmdIQuery('')
+      }
+      if (e.key === 'Escape' && cmdIOpen) {
+        setCmdIOpen(false)
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [cmdIOpen])
+
+  // Focus Cmd+I input when opened
+  useEffect(() => {
+    if (cmdIOpen) {
+      setTimeout(() => cmdIInputRef.current?.focus(), 50)
+    }
+  }, [cmdIOpen])
+
+  // Register AI tab completion provider
+  const registerCompletionProvider = useCallback(async (monaco: Monaco) => {
+    // Check if AI completion is enabled
+    const settings = await window.electronAPI?.settings?.get().catch(() => null)
+    if (!settings?.aiCompletionEnabled) return
+
+    // Dispose previous provider if any
+    completionProviderRef.current?.dispose()
+
+    const disposable = monaco.languages.registerInlineCompletionsProvider('*', {
+      provideInlineCompletions: async (model: import('monaco-editor').editor.ITextModel, position: import('monaco-editor').Position) => {
+        if (completionDebounceRef.current) clearTimeout(completionDebounceRef.current)
+        return new Promise(resolve => {
+          completionDebounceRef.current = setTimeout(async () => {
+            try {
+              const prefix = model.getValueInRange({
+                startLineNumber: 1,
+                startColumn: 1,
+                endLineNumber: position.lineNumber,
+                endColumn: position.column
+              })
+              const context = prefix.slice(-500)
+              const completion = await window.electronAPI?.editorAI?.command('Complete the next part of this code, output ONLY the completion text, no explanation', context)
+              if (completion && !completion.startsWith('// Error')) {
+                resolve({ items: [{ insertText: completion }] })
+              } else {
+                resolve({ items: [] })
+              }
+            } catch {
+              resolve({ items: [] })
+            }
+          }, 800)
+        })
+      },
+      freeInlineCompletions: () => {}
+    })
+    completionProviderRef.current = disposable
+  }, [])
+
+  // Handle Cmd+I submission
+  const handleCmdISubmit = useCallback(async () => {
+    if (!cmdIQuery.trim() || !editorRef.current) return
+    const editor = editorRef.current
+    const model = editor.getModel()
+    if (!model) return
+
+    setCmdILoading(true)
+    try {
+      const selection = editor.getSelection()
+      const selectedText = selection ? model.getValueInRange(selection) : ''
+      const fullContent = model.getValue()
+      const fileName = activeTabPath?.split(/[\\/]/).pop() ?? 'unknown'
+      const language = activeTabPath ? getLanguage(activeTabPath) : 'plaintext'
+
+      const context = JSON.stringify({
+        filename: fileName,
+        language,
+        selectedText: selectedText || undefined,
+        surroundingCode: selectedText ? undefined : fullContent.slice(0, 2000)
+      })
+
+      const result = await window.electronAPI?.editorAI?.command(cmdIQuery.trim(), context)
+
+      if (result && !result.startsWith('// Error') && result.trim()) {
+        if (selection && selectedText) {
+          // Replace selected text
+          editor.executeEdits('ai-command', [{
+            range: selection,
+            text: result,
+            forceMoveMarkers: true
+          }])
+        } else {
+          // Insert at cursor
+          const position = editor.getPosition()
+          if (position) {
+            editor.executeEdits('ai-command', [{
+              range: {
+                startLineNumber: position.lineNumber,
+                startColumn: position.column,
+                endLineNumber: position.lineNumber,
+                endColumn: position.column
+              },
+              text: result,
+              forceMoveMarkers: true
+            }])
+          }
+        }
+      }
+    } finally {
+      setCmdILoading(false)
+      setCmdIOpen(false)
+      setCmdIQuery('')
+    }
+  }, [cmdIQuery, activeTabPath])
+
   if (tabs.length === 0) {
     return (
       <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--bg-primary)', flexDirection: 'column', gap: 8 }}>
         <div style={{ fontSize: 48 }}>⚡</div>
         <div style={{ color: 'var(--text-secondary)', fontSize: 14, fontWeight: 500 }}>Gravity</div>
         <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>Open a file from the sidebar to start editing</div>
+        <div style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 4 }}>Cmd+I for AI commands · Cmd+, for Settings</div>
       </div>
     )
   }
@@ -79,7 +211,7 @@ export default function EditorPane({
   const showPreviewBtn = !!activeTab && isMarkdown(activeTab.path)
 
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', position: 'relative' }}>
       {/* Tab bar */}
       <div
         style={{
@@ -172,6 +304,83 @@ export default function EditorPane({
         )}
       </div>
 
+      {/* Cmd+I overlay */}
+      {cmdIOpen && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 'var(--tab-height, 35px)',
+            left: 0,
+            right: 0,
+            zIndex: 100,
+            background: 'var(--bg-secondary)',
+            borderBottom: '1px solid var(--border)',
+            padding: '10px 14px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 6,
+            boxShadow: '0 4px 20px rgba(0,0,0,0.3)'
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ fontSize: 12, color: 'var(--accent)', fontWeight: 600, flexShrink: 0 }}>✦ AI</span>
+            {activeTab && (
+              <span style={{ fontSize: 11, color: 'var(--text-muted)', flexShrink: 0 }}>
+                {activeTab.label} · {getLanguage(activeTab.path)}
+                {editorRef.current?.getSelection() && !editorRef.current.getSelection()?.isEmpty()
+                  ? ' · selection'
+                  : ''}
+              </span>
+            )}
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input
+              ref={cmdIInputRef}
+              value={cmdIQuery}
+              onChange={e => setCmdIQuery(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleCmdISubmit() }
+                if (e.key === 'Escape') { setCmdIOpen(false); setCmdIQuery('') }
+              }}
+              placeholder='Describe what to do… e.g. "Add error handling" or "Refactor to async/await"'
+              style={{
+                flex: 1,
+                padding: '6px 10px',
+                background: 'var(--bg-primary)',
+                border: '1px solid var(--accent)',
+                borderRadius: 4,
+                color: 'var(--text-primary)',
+                fontSize: 13,
+                outline: 'none',
+                fontFamily: 'inherit'
+              }}
+            />
+            <button
+              onClick={handleCmdISubmit}
+              disabled={cmdILoading || !cmdIQuery.trim()}
+              style={{
+                padding: '6px 14px',
+                background: cmdILoading || !cmdIQuery.trim() ? 'var(--bg-tertiary)' : 'var(--accent)',
+                color: '#fff',
+                border: 'none',
+                borderRadius: 4,
+                fontSize: 12,
+                cursor: cmdILoading || !cmdIQuery.trim() ? 'not-allowed' : 'pointer',
+                flexShrink: 0
+              }}
+            >
+              {cmdILoading ? '…' : 'Apply'}
+            </button>
+            <button
+              onClick={() => { setCmdIOpen(false); setCmdIQuery('') }}
+              style={{ padding: '6px 10px', background: 'transparent', color: 'var(--text-muted)', border: '1px solid var(--border)', borderRadius: 4, fontSize: 12, cursor: 'pointer', flexShrink: 0 }}
+            >
+              Esc
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Editor area: split when preview is open */}
       {activeTab && (
         <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
@@ -196,14 +405,18 @@ export default function EditorPane({
                 insertSpaces: true,
                 bracketPairColorization: { enabled: true },
                 guides: { bracketPairs: true },
-                padding: { top: 8 }
+                padding: { top: 8 },
+                inlineSuggest: { enabled: true }
               }}
               onChange={value => {
                 if (value !== undefined) onContentChange(activeTab.path, value)
               }}
-              onMount={editor => {
+              onMount={(editor, monaco) => {
                 editorRef.current = editor
+                monacoRef.current = monaco
                 editor.focus()
+                // Register AI completion provider
+                registerCompletionProvider(monaco)
               }}
             />
           </div>

@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import type { WebviewElement, IpcResult } from '../types'
+import type { WebviewElement, IpcResult, McpConnectionConfig, McpConnection } from '../types'
 
 // ─── Layout constants ─────────────────────────────────────────────────────────
 
@@ -8,7 +8,7 @@ const STATUS_H = 28
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type BrowserView = 'live' | 'playwright'
+type BrowserView = 'live' | 'playwright' | 'connections'
 type PlaywrightState = 'idle' | 'launching' | 'active' | 'error'
 type McpState = 'stopped' | 'starting' | 'running' | 'error'
 
@@ -59,6 +59,173 @@ function NavButton({
     >
       {children}
     </button>
+  )
+}
+
+// ─── MCP Connections Panel ───────────────────────────────────────────────────
+
+function ConnectionsPanel() {
+  const [connections, setConnections] = useState<McpConnection[]>([])
+  const [newName, setNewName] = useState('')
+  const [newCommand, setNewCommand] = useState('')
+  const [newArgs, setNewArgs] = useState('')
+  const [adding, setAdding] = useState(false)
+  const [loading, setLoading] = useState(false)
+
+  const INPUT = {
+    padding: '5px 8px',
+    background: 'var(--bg-secondary)',
+    border: '1px solid var(--border)',
+    borderRadius: 4,
+    color: 'var(--text-primary)',
+    fontSize: 12,
+    outline: 'none',
+    fontFamily: 'inherit'
+  } as React.CSSProperties
+
+  const refreshConnections = useCallback(async () => {
+    const list = await window.electronAPI?.browser?.mcp?.listConnections?.()
+    if (list) setConnections(list)
+  }, [])
+
+  useEffect(() => {
+    refreshConnections()
+    const t = setInterval(refreshConnections, 2000)
+    return () => clearInterval(t)
+  }, [refreshConnections])
+
+  const handleAdd = async () => {
+    if (!newName.trim() || !newCommand.trim()) return
+    setLoading(true)
+    try {
+      const cfg: McpConnectionConfig = {
+        name: newName.trim(),
+        command: newCommand.trim(),
+        args: newArgs.trim() ? newArgs.trim().split(' ').filter(Boolean) : undefined
+      }
+      await window.electronAPI?.browser?.mcp?.addConnection?.(cfg)
+      setNewName('')
+      setNewCommand('')
+      setNewArgs('')
+      setAdding(false)
+      await refreshConnections()
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleRemove = async (name: string) => {
+    await window.electronAPI?.browser?.mcp?.removeConnection?.(name)
+    await refreshConnections()
+  }
+
+  const statusColor = (status: McpConnection['status']) => {
+    if (status === 'running') return '#4ec9b0'
+    if (status === 'starting') return '#dcdcaa'
+    if (status === 'error') return '#f44747'
+    return 'var(--text-muted)'
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'auto' }}>
+      {/* Header */}
+      <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0 }}>
+        <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>External MCP Connections</span>
+        <button
+          onClick={() => setAdding(v => !v)}
+          style={{ padding: '3px 10px', fontSize: 11, background: 'var(--accent)', color: '#fff', border: 'none', borderRadius: 4, cursor: 'pointer' }}
+        >
+          + Add
+        </button>
+      </div>
+
+      {/* Add form */}
+      {adding && (
+        <div style={{ padding: '10px 14px', background: 'var(--bg-tertiary)', borderBottom: '1px solid var(--border)', display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <input
+              value={newName}
+              onChange={e => setNewName(e.target.value)}
+              placeholder="Name (e.g. supabase)"
+              style={{ ...INPUT, flex: 1 }}
+            />
+          </div>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <input
+              value={newCommand}
+              onChange={e => setNewCommand(e.target.value)}
+              placeholder="Command (e.g. npx @supabase/mcp@latest)"
+              style={{ ...INPUT, flex: 1 }}
+              onKeyDown={e => { if (e.key === 'Enter') handleAdd() }}
+            />
+          </div>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <input
+              value={newArgs}
+              onChange={e => setNewArgs(e.target.value)}
+              placeholder="Extra args (space-separated, optional)"
+              style={{ ...INPUT, flex: 1 }}
+            />
+          </div>
+          <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+            <button onClick={() => setAdding(false)} style={{ padding: '4px 10px', fontSize: 11, background: 'transparent', color: 'var(--text-secondary)', border: '1px solid var(--border)', borderRadius: 4, cursor: 'pointer' }}>Cancel</button>
+            <button
+              onClick={handleAdd}
+              disabled={loading || !newName.trim() || !newCommand.trim()}
+              style={{ padding: '4px 10px', fontSize: 11, background: 'var(--accent)', color: '#fff', border: 'none', borderRadius: 4, cursor: 'pointer', opacity: loading ? 0.6 : 1 }}
+            >
+              {loading ? 'Starting…' : 'Start'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Connection list */}
+      <div style={{ flex: 1, overflow: 'auto' }}>
+        {connections.length === 0 ? (
+          <div style={{ padding: '20px 14px', color: 'var(--text-muted)', fontSize: 12, textAlign: 'center' }}>
+            No MCP connections configured.
+            <br />
+            <span style={{ fontSize: 11, marginTop: 4, display: 'block' }}>Add one above to connect to external tools.</span>
+          </div>
+        ) : (
+          connections.map(conn => (
+            <div key={conn.name} style={{ padding: '10px 14px', borderBottom: '1px solid var(--border)', display: 'flex', flexDirection: 'column', gap: 3 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ width: 8, height: 8, borderRadius: '50%', background: statusColor(conn.status), flexShrink: 0 }} />
+                <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-primary)', flex: 1 }}>{conn.name}</span>
+                {conn.port && (
+                  <span style={{ fontSize: 10, fontFamily: 'monospace', color: 'var(--text-muted)', background: 'var(--bg-tertiary)', padding: '1px 6px', borderRadius: 10 }}>
+                    :{conn.port}
+                  </span>
+                )}
+                <button
+                  onClick={() => handleRemove(conn.name)}
+                  style={{ fontSize: 10, padding: '2px 6px', background: 'transparent', color: '#f44747', border: '1px solid #f44747', borderRadius: 3, cursor: 'pointer' }}
+                >
+                  Remove
+                </button>
+              </div>
+              <div style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: 'monospace', paddingLeft: 16 }}>
+                {conn.command}{conn.args?.length ? ' ' + conn.args.join(' ') : ''}
+              </div>
+              <div style={{ fontSize: 10, color: statusColor(conn.status), paddingLeft: 16 }}>
+                {conn.status}
+                {conn.pid ? ` (pid ${conn.pid})` : ''}
+                {conn.port && conn.status === 'running' ? (
+                  <button
+                    onClick={() => navigator.clipboard?.writeText(`http://localhost:${conn.port}/sse`).catch(() => {})}
+                    style={{ marginLeft: 6, fontSize: 9, padding: '1px 4px', background: 'var(--bg-active)', color: 'var(--text-muted)', border: 'none', borderRadius: 2, cursor: 'pointer' }}
+                  >
+                    Copy URL
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
   )
 }
 
@@ -325,7 +492,7 @@ export default function BrowserPane({ initialUrl = 'https://www.google.com' }: B
             flexShrink: 0
           }}
         >
-          {(['live', 'playwright'] as BrowserView[]).map(v => (
+          {(['live', 'playwright', 'connections'] as BrowserView[]).map(v => (
             <button
               key={v}
               onClick={() => setView(v)}
@@ -339,7 +506,7 @@ export default function BrowserPane({ initialUrl = 'https://www.google.com' }: B
                 transition: 'all 0.1s'
               }}
             >
-              {v === 'live' ? '🌐 Live' : '🤖 Playwright'}
+              {v === 'live' ? '🌐 Live' : v === 'playwright' ? '🤖 Playwright' : '🔌 Connections'}
             </button>
           ))}
         </div>
@@ -358,32 +525,34 @@ export default function BrowserPane({ initialUrl = 'https://www.google.com' }: B
           </>
         )}
 
-        {/* URL bar */}
-        <input
-          value={inputUrl}
-          onChange={e => setInputUrl(e.target.value)}
-          onKeyDown={handleUrlKeyDown}
-          onFocus={e => e.currentTarget.select()}
-          placeholder={view === 'playwright' ? 'URL for Playwright to navigate…' : 'Enter URL or search…'}
-          style={{
-            flex: 1,
-            height: 24,
-            padding: '0 8px',
-            background: 'var(--bg-primary)',
-            border: '1px solid var(--border)',
-            borderRadius: 4,
-            color: 'var(--text-primary)',
-            fontSize: 12,
-            fontFamily: 'var(--font-mono)',
-            outline: 'none'
-          }}
-          onKeyDownCapture={e => {
-            if (e.key === 'Enter' && view === 'playwright') {
-              e.preventDefault()
-              playwrightGoto(inputUrl)
-            }
-          }}
-        />
+        {/* URL bar — only for live and playwright */}
+        {view !== 'connections' && (
+          <input
+            value={inputUrl}
+            onChange={e => setInputUrl(e.target.value)}
+            onKeyDown={handleUrlKeyDown}
+            onFocus={e => e.currentTarget.select()}
+            placeholder={view === 'playwright' ? 'URL for Playwright to navigate…' : 'Enter URL or search…'}
+            style={{
+              flex: 1,
+              height: 24,
+              padding: '0 8px',
+              background: 'var(--bg-primary)',
+              border: '1px solid var(--border)',
+              borderRadius: 4,
+              color: 'var(--text-primary)',
+              fontSize: 12,
+              fontFamily: 'var(--font-mono)',
+              outline: 'none'
+            }}
+            onKeyDownCapture={e => {
+              if (e.key === 'Enter' && view === 'playwright') {
+                e.preventDefault()
+                playwrightGoto(inputUrl)
+              }
+            }}
+          />
+        )}
 
         {/* Action buttons */}
         {view === 'live' && (
@@ -402,7 +571,7 @@ export default function BrowserPane({ initialUrl = 'https://www.google.com' }: B
 
       {/* ── Main area ── */}
       <div style={{ flex: 1, overflow: 'hidden', position: 'relative' }}>
-        {/* Live webview (always mounted, hidden when in playwright view) */}
+        {/* Live webview (always mounted, hidden when in other views) */}
         <div
           ref={webviewContainerRef}
           style={{
@@ -534,6 +703,13 @@ export default function BrowserPane({ initialUrl = 'https://www.google.com' }: B
                 )}
               </div>
             )}
+          </div>
+        )}
+
+        {/* Connections view */}
+        {view === 'connections' && (
+          <div style={{ position: 'absolute', inset: 0 }}>
+            <ConnectionsPanel />
           </div>
         )}
       </div>
